@@ -79,8 +79,104 @@ const GRAPHQL_STATS_QUERY = `
 `;
 
 /**
- * Stats fetcher object.
+ * Whether stats for this username should be aggregated across all accounts
+ * configured in AGGREGATE_PATS.
  *
+ * @param {string} username GitHub username.
+ * @returns {boolean} True if aggregation applies.
+ */
+const shouldAggregate = (username) =>
+  !!process.env.AGGREGATE_PATS &&
+  !!process.env.AGGREGATE_USERNAME &&
+  username.toLowerCase() === process.env.AGGREGATE_USERNAME.toLowerCase();
+
+/** @returns {string[]} Tokens of all aggregated accounts. */
+const getAggregateTokens = () =>
+  (process.env.AGGREGATE_PATS || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+const GRAPHQL_VIEWER_QUERY = GRAPHQL_STATS_QUERY.replace(
+  "$login: String!, ",
+  "",
+).replace("user(login: $login)", "viewer");
+
+/**
+ * Fetch stats of every aggregated account (each token's own account, so private
+ * data is included) and merge them into a single user object.
+ *
+ * @param {string} username Main username (used for display name).
+ * @param {object} flags Query flags.
+ * @returns {Promise<any>} Axios-like response with merged `user`.
+ */
+const aggregateStatsFetcher = async (username, flags) => {
+  const results = await Promise.all(
+    getAggregateTokens().map((token) =>
+      request(
+        {
+          query: GRAPHQL_VIEWER_QUERY,
+          variables: { after: null, ...flags },
+        },
+        { Authorization: `bearer ${token}` },
+      ),
+    ),
+  );
+  const failed = results.find((r) => r.data.errors || !r.data.data?.viewer);
+  if (failed) {
+    return failed.data.errors ? failed : { data: { errors: [{}] } };
+  }
+  const users = results.map((r) => r.data.data.viewer);
+  const main =
+    users.find((u) => u.login.toLowerCase() === username.toLowerCase()) ||
+    users[0];
+  const sum = (/** @type {(u: any) => number | undefined} */ f) =>
+    users.reduce((acc, u) => acc + (f(u) || 0), 0);
+  const seen = new Set();
+  const repoNodes = users
+    .flatMap((u) => u.repositories.nodes)
+    .filter((n) => {
+      // repo names are unique per owner; dedupe by name+stars is not safe, keep all.
+      return n && !seen.has(n) && seen.add(n);
+    });
+  const user = {
+    name: main.name,
+    login: main.login,
+    logins: users.map((u) => u.login),
+    commits: {
+      totalCommitContributions: sum((u) => u.commits.totalCommitContributions),
+    },
+    reviews: {
+      totalPullRequestReviewContributions: sum(
+        (u) => u.reviews.totalPullRequestReviewContributions,
+      ),
+    },
+    repositoriesContributedTo: {
+      totalCount: sum((u) => u.repositoriesContributedTo.totalCount),
+    },
+    pullRequests: { totalCount: sum((u) => u.pullRequests.totalCount) },
+    mergedPullRequests: {
+      totalCount: sum((u) => u.mergedPullRequests?.totalCount),
+    },
+    openIssues: { totalCount: sum((u) => u.openIssues.totalCount) },
+    closedIssues: { totalCount: sum((u) => u.closedIssues.totalCount) },
+    followers: { totalCount: sum((u) => u.followers.totalCount) },
+    repositoryDiscussions: {
+      totalCount: sum((u) => u.repositoryDiscussions?.totalCount),
+    },
+    repositoryDiscussionComments: {
+      totalCount: sum((u) => u.repositoryDiscussionComments?.totalCount),
+    },
+    repositories: {
+      totalCount: sum((u) => u.repositories.totalCount),
+      nodes: repoNodes,
+    },
+  };
+  return { data: { data: { user } } };
+};
+
+/**
+ * Stats fetcher object. *
  * @param {object & { after: string | null }} variables Fetcher variables.
  * @param {string} token GitHub token.
  * @returns {Promise<import('axios').AxiosResponse>} Axios response.
@@ -118,6 +214,14 @@ const statsFetcher = async ({
   includeDiscussionsAnswers,
   startTime,
 }) => {
+  if (shouldAggregate(username)) {
+    return aggregateStatsFetcher(username, {
+      includeMergedPullRequests,
+      includeDiscussions,
+      includeDiscussionsAnswers,
+      startTime,
+    });
+  }
   let stats;
   let hasNextPage = true;
   let endCursor = null;
@@ -287,7 +391,20 @@ const fetchStats = async (
 
   // if include_all_commits, fetch all commits using the REST API.
   if (include_all_commits) {
-    stats.totalCommits = await totalCommitsFetcher(username);
+    const logins = user.logins || [username];
+    const token = getAggregateTokens()[0];
+    stats.totalCommits =
+      user.logins && token
+        ? (
+            await Promise.all(
+              logins.map((l) =>
+                fetchTotalCommits({ login: l }, token).then(
+                  (r) => r.data.total_count || 0,
+                ),
+              ),
+            )
+          ).reduce((a, b) => a + b, 0)
+        : await totalCommitsFetcher(username);
   } else {
     stats.totalCommits = user.commits.totalCommitContributions;
   }

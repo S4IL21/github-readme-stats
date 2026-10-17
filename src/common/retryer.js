@@ -9,7 +9,13 @@ import { logger } from "./log.js";
 const PATs = Object.keys(process.env).filter((key) =>
   /PAT_\d*$/.exec(key),
 ).length;
-const RETRIES = process.env.NODE_ENV === "test" ? 7 : PATs;
+// Extra tokens (comma separated) from other accounts, used as fallback tokens.
+const aggregateTokens = (process.env.AGGREGATE_PATS || "")
+  .split(",")
+  .map((t) => t.trim())
+  .filter(Boolean);
+const RETRIES =
+  process.env.NODE_ENV === "test" ? 7 : PATs + aggregateTokens.length;
 
 /**
  * @typedef {import("axios").AxiosResponse} AxiosResponse Axios response.
@@ -41,7 +47,7 @@ const retryer = async (fetcher, variables, retries = 0) => {
     let response = await fetcher(
       variables,
       // @ts-ignore
-      process.env[`PAT_${retries + 1}`],
+      process.env[`PAT_${retries + 1}`] ?? aggregateTokens[retries - PATs],
       // used in tests for faking rate limit
       retries,
     );

@@ -83,7 +83,9 @@ const fetchViewerRepos = async (token) => {
       break;
     }
     nodes.push(...repos.nodes);
-    if (!repos.pageInfo.hasNextPage) break;
+    if (!repos.pageInfo.hasNextPage) {
+      break;
+    }
     after = repos.pageInfo.endCursor;
   }
   return nodes;
@@ -102,7 +104,9 @@ const fetchAggregatedRepos = async () => {
   const all = await Promise.all(tokens.map(fetchViewerRepos));
   const seen = new Set();
   return all.flat().filter((r) => {
-    if (seen.has(r.nameWithOwner)) return false;
+    if (seen.has(r.nameWithOwner)) {
+      return false;
+    }
     seen.add(r.nameWithOwner);
     return true;
   });
