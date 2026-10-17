@@ -47,6 +47,68 @@ const fetcher = (variables, token) => {
 };
 
 /**
+ * Fetch all owned non-fork repos (including private) of the account a token belongs to.
+ *
+ * @param {string} token GitHub token (needs `repo` scope for private repos).
+ * @returns {Promise<any[]>} Repo nodes.
+ */
+const fetchViewerRepos = async (token) => {
+  const nodes = [];
+  let after = null;
+  for (let page = 0; page < 20; page++) {
+    const res = await request(
+      {
+        query: `
+        query viewerRepos($after: String) {
+          viewer {
+            repositories(ownerAffiliations: OWNER, isFork: false, first: 100, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              nodes {
+                nameWithOwner
+                name
+                languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+                  edges { size node { color name } }
+                }
+              }
+            }
+          }
+        }`,
+        variables: { after },
+      },
+      { Authorization: `token ${token}` },
+    );
+    const repos = res.data?.data?.viewer?.repositories;
+    if (!repos) {
+      logger.error(res.data?.errors || "Could not fetch viewer repos");
+      break;
+    }
+    nodes.push(...repos.nodes);
+    if (!repos.pageInfo.hasNextPage) break;
+    after = repos.pageInfo.endCursor;
+  }
+  return nodes;
+};
+
+/**
+ * Collect repos from all accounts configured in AGGREGATE_PATS (comma separated tokens).
+ *
+ * @returns {Promise<any[]>} Deduplicated repo nodes.
+ */
+const fetchAggregatedRepos = async () => {
+  const tokens = (process.env.AGGREGATE_PATS || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const all = await Promise.all(tokens.map(fetchViewerRepos));
+  const seen = new Set();
+  return all.flat().filter((r) => {
+    if (seen.has(r.nameWithOwner)) return false;
+    seen.add(r.nameWithOwner);
+    return true;
+  });
+};
+
+/**
  * @typedef {import("./types").TopLangData} TopLangData Top languages data.
  */
 
@@ -69,7 +131,20 @@ const fetchTopLanguages = async (
     throw new MissingParamError(["username"]);
   }
 
-  const res = await retryer(fetcher, { login: username });
+  const aggregate =
+    !!process.env.AGGREGATE_PATS &&
+    !!process.env.AGGREGATE_USERNAME &&
+    username.toLowerCase() === process.env.AGGREGATE_USERNAME.toLowerCase();
+
+  const res = aggregate
+    ? {
+        data: {
+          data: {
+            user: { repositories: { nodes: await fetchAggregatedRepos() } },
+          },
+        },
+      }
+    : await retryer(fetcher, { login: username });
 
   if (res.data.errors) {
     logger.error(res.data.errors);
