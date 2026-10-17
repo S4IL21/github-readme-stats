@@ -112,21 +112,37 @@ const GRAPHQL_VIEWER_QUERY = GRAPHQL_STATS_QUERY.replace(
  */
 const aggregateStatsFetcher = async (username, flags) => {
   const results = await Promise.all(
-    getAggregateTokens().map((token) =>
-      request(
-        {
-          query: GRAPHQL_VIEWER_QUERY,
-          variables: { after: null, ...flags },
-        },
-        { Authorization: `bearer ${token}` },
-      ),
-    ),
+    getAggregateTokens().map(async (token) => {
+      try {
+        return await request(
+          {
+            query: GRAPHQL_VIEWER_QUERY,
+            variables: { after: null, ...flags },
+          },
+          { Authorization: `bearer ${token}` },
+        );
+      } catch (err) {
+        // e.g. revoked/expired token: don't take the whole card down
+        /** @type {any} */
+        const e = err;
+        logger.error(e?.response?.data || e?.message);
+        return { data: { errors: [{ message: "Bad credentials" }] } };
+      }
+    }),
   );
-  const failed = results.find((r) => r.data.errors || !r.data.data?.viewer);
-  if (failed) {
-    return failed.data.errors ? failed : { data: { errors: [{}] } };
+  const okResults = results.filter(
+    (r) => !r.data.errors && r.data.data?.viewer,
+  );
+  if (okResults.length === 0) {
+    // every account failed: surface the first error
+    return results[0];
   }
-  const users = results.map((r) => r.data.data.viewer);
+  if (okResults.length < results.length) {
+    logger.error(
+      `${results.length - okResults.length} aggregate account(s) failed and were skipped.`,
+    );
+  }
+  const users = okResults.map((r) => r.data.data.viewer);
   const main =
     users.find((u) => u.login.toLowerCase() === username.toLowerCase()) ||
     users[0];

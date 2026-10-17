@@ -101,7 +101,15 @@ const fetchAggregatedRepos = async () => {
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
-  const all = await Promise.all(tokens.map(fetchViewerRepos));
+  const all = await Promise.all(
+    tokens.map((token) =>
+      fetchViewerRepos(token).catch((err) => {
+        // e.g. revoked token: skip that account instead of failing the card
+        logger.error(err?.response?.data || err?.message);
+        return [];
+      }),
+    ),
+  );
   const seen = new Set();
   return all.flat().filter((r) => {
     if (seen.has(r.nameWithOwner)) {

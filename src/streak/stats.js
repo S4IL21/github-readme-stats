@@ -396,11 +396,21 @@ const generateStreakStats = async (rawUser, params = {}) => {
   let calendars;
   if (shouldAggregate(user)) {
     // every token's own account (viewer): includes private contributions
-    const accounts = await Promise.all(
+    const settled = await Promise.allSettled(
       getAggregateTokens().map((token) =>
         fetchAccountCalendars("viewer", "viewer", [token], startingYear),
       ),
     );
+    const accounts = settled.flatMap((s) =>
+      s.status === "fulfilled" ? [s.value] : [],
+    );
+    if (accounts.length === 0) {
+      // every account failed: surface the first error
+      throw /** @type {PromiseRejectedResult} */ (settled[0]).reason;
+    }
+    if (accounts.length < settled.length) {
+      logger.error("Some aggregate accounts failed and were skipped.");
+    }
     calendars = accounts.flatMap((a) => a.calendars);
   } else {
     const tokens = [...getPatTokens(), ...getAggregateTokens()];
